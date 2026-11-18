@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BlueTrigger</title>
+<style>
+* { box-sizing: border-box; }
+body { margin: 0; padding: 20px; background: #10131a; color: white; font-family: -apple-system, sans-serif; text-align: center; }
+h1 { margin-bottom: 5px; }
+.subtitle { color: #9da8bb; font-size: 13px; }
+.camera { position: relative; margin: 22px auto; max-width: 600px; }
+video { width: 100%; border-radius: 16px; background: #000; }
+.status { margin: 15px; padding: 13px; border-radius: 10px; background: #242b38; font-weight: bold; }
+.detected { background: #0755c9; }
+button { border: 0; padding: 15px 25px; margin: 7px; border-radius: 12px; background: #246bfe; color: white; font-size: 15px; font-weight: bold; }
+button.stop { background: #d83d4b; }
+.settings { max-width: 400px; margin: 20px auto; text-align: left; background: #202633; padding: 16px; border-radius: 12px; }
+input { width: 100%; margin: 10px 0 18px; }
+#gallery { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 20px; }
+#gallery img { width: 100%; border-radius: 10px; }
+.small { font-size: 12px; color: #9da8bb; }
+</style>
+</head>
+<body>
+<h1>BlueTrigger</h1>
+<div class="subtitle">Automatic blue clothing detection camera</div>
+
+<div class="camera">
+  <video id="video" autoplay playsinline muted></video>
+</div>
+
+<div id="status" class="status">Camera not started</div>
+<div>
+  <button id="startButton">START CAMERA</button>
+  <button id="stopButton" class="stop">STOP</button>
+</div>
+
+<div class="settings">
+  <h3>Detection Settings</h3>
+  <label>Blue pixel threshold: <span id="thresholdValue">20%</span></label>
+  <input id="threshold" type="range" min="5" max="60" value="20">
+  <label>Scan interval: <span id="intervalValue">150 ms</span></label>
+  <input id="interval" type="range" min="100" max="1000" step="50" value="150">
+</div>
+
+<h3>Captured Photographs</h3>
+<div class="small" id="count">0 photographs captured</div>
+<div id="gallery"></div>
+<canvas id="canvas" hidden></canvas>
+
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const statusBox = document.getElementById("status");
+const gallery = document.getElementById("gallery");
+
+let stream = null;
+let running = false;
+let timer = null;
+let lastCapture = 0;
+let blueFrames = 0;
+let capturedCount = 0;
+
+const MIN_BLUE = 90;
+const BLUE_DOMINANCE = 1.25;
+const MIN_SATURATION = 0.25;
+
+document.getElementById("threshold").addEventListener("input", event => {
+  document.getElementById("thresholdValue").textContent = event.target.value + "%";
+});
+document.getElementById("interval").addEventListener("input", event => {
+  document.getElementById("intervalValue").textContent = event.target.value + " ms";
+});
+document.getElementById("startButton").addEventListener("click", startCamera);
+document.getElementById("stopButton").addEventListener("click", stopCamera);
+
+async function startCamera() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    statusBox.textContent = "Camera access requires Safari on HTTPS.";
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    running = true;
+    blueFrames = 0;
+    statusBox.textContent = "SCANNING FOR BLUE";
+    statusBox.className = "status";
+    scan();
+  } catch (error) {
+    statusBox.textContent = "Camera error: " + error.message;
+    console.error(error);
+  }
+}
+
+function stopCamera() {
+  running = false;
+  clearTimeout(timer);
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+  video.srcObject = null;
+  statusBox.textContent = "CAMERA STOPPED";
+  statusBox.className = "status";
+}
+
+function detectBlue() {
+  if (!video.videoWidth) return false;
+  const width = 160, height = 120;
+  canvas.width = width;
+  canvas.height = height;
+  ctx.drawImage(video, 0, 0, width, height);
+  const pixels = ctx.getImageData(0, 0, width, height).data;
+  let bluePixels = 0, validPixels = 0;
+
+  // Sample the central portion of the frame.
+  for (let y = 15; y < 110; y += 2) {
+    for (let x = 25; x < 135; x += 2) {
+      const i = (y * width + x) * 4;
+      const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+      const max = Math.max(r, g, b);
+      const min = Math.min(r, g, b);
+      const saturation = max === 0 ? 0 : (max - min) / max;
+      validPixels++;
+      if (b > MIN_BLUE && b > r * BLUE_DOMINANCE &&
+          b > g * 1.05 && saturation > MIN_SATURATION) {
+        bluePixels++;
+      }
+    }
+  }
+  const ratio = bluePixels / validPixels;
+  const threshold = Number(document.getElementById("threshold").value) / 100;
+  return ratio >= threshold;
+}
+
+function scan() {
+  if (!running) return;
+  const foundBlue = detectBlue();
+
+  if (foundBlue) {
+    blueFrames++;
+    statusBox.textContent = "BLUE DETECTED";
+    statusBox.className = "status detected";
+    if (blueFrames >= 3 && Date.now() - lastCapture > 4000) {
+      capturePhoto();
+      lastCapture = Date.now();
+    }
+  } else {
+    blueFrames = 0;
+    statusBox.textContent = "SCANNING FOR BLUE";
+    statusBox.className = "status";
+  }
+  timer = setTimeout(scan, Number(document.getElementById("interval").value));
+}
+
+function capturePhoto() {
+  if (!video.videoWidth) return;
+  const photoCanvas = document.createElement("canvas");
+  photoCanvas.width = video.videoWidth;
+  photoCanvas.height = video.videoHeight;
+  const photoContext = photoCanvas.getContext("2d");
+  photoContext.drawImage(video, 0, 0, photoCanvas.width, photoCanvas.height);
+
+  photoCanvas.toBlob(blob => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const image = document.createElement("img");
+    image.src = url;
+    image.alt = "BlueTrigger captured frame";
+
+    const link = document.createElement("a");
+    const time = new Date().toISOString().replace(/[:.]/g, "-");
+    link.href = url;
+    link.download = "BlueTrigger_" + time + ".jpg";
+    link.appendChild(image);
+    gallery.prepend(link);
+
+    capturedCount++;
+    document.getElementById("count").textContent = capturedCount + " photographs captured";
+    statusBox.textContent = "BLUE DETECTED — PHOTO CAPTURED";
+  }, "image/jpeg", 0.92);
+}
+</script>
+</body>
+</html>
